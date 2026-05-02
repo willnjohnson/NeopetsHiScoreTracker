@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Neopets Hi-Score Tracker
 // @namespace    GreaseMonkey
-// @version      1.0
+// @version      1.0.1
 // @description  Tracks Neopets game high scores and displays daily/monthly/total changes, resetting daily/monthly at calendar start.
 // @author       @willnjohnson
 // @match        *://www.neopets.com/gamescores.phtml?game_id=*
@@ -274,7 +274,8 @@
     // Rowspan breaks immediately when rows are reordered by sort, so we skip it.
 
 		class TableBuilder {
-        static build(scores, allUsers) {
+        // Accept gameId to handle persistent storage
+        static build(scores, allUsers, gameId) {
             const changeData = {};
             scores.forEach(score => {
                 changeData[score.username] = calculateChanges(score.username, score.points, allUsers);
@@ -287,7 +288,9 @@
 
             table.appendChild(this._buildHead());
             table.appendChild(this._buildBody(scores, changeData));
-            this._attachSort(table, changeData);
+            
+            // Pass gameId here
+            this._attachSort(table, changeData, gameId);
 
             return table;
         }
@@ -296,16 +299,14 @@
             const thead = createElement('thead');
             const tr    = createElement('tr');
 
-            // sortKey: null = not sortable; string = key for comparator
-            // 'username' and 'points' are passed through to the row data
             const COLS = [
-                { label: 'Pos',            width: '5%',  sortKey: 'position' },
-                { label: 'Username',       width: '18%', sortKey: 'username' },
-                { label: 'Points',         width: '13%', sortKey: 'points'   },
-                { label: 'Δ (Total)',      width: '12%', sortKey: 'totalChange'   },
-                { label: 'Δ (Day)',        width: '12%', sortKey: 'dailyChange'   },
-                { label: 'Δ (Month)',      width: '12%', sortKey: 'monthlyChange' },
-                { label: 'Trophy',         width: '8%',  sortKey: null            }
+                { label: 'Pos',        width: '5%',  sortKey: 'position' },
+                { label: 'Username',   width: '18%', sortKey: 'username' },
+                { label: 'Points',     width: '13%', sortKey: 'points'   },
+                { label: 'Δ (Total)',  width: '12%', sortKey: 'totalChange'   },
+                { label: 'Δ (Day)',    width: '12%', sortKey: 'dailyChange'   },
+                { label: 'Δ (Month)',  width: '12%', sortKey: 'monthlyChange' },
+                { label: 'Trophy',     width: '8%',  sortKey: null            }
             ];
 
             COLS.forEach(({ label, width, sortKey }) => {
@@ -337,7 +338,6 @@
         static _buildBody(scores, changeData) {
             const tbody = createElement('tbody');
             scores.forEach(score => {
-                // Attach original data to the row for the sorter to read
                 const row = this._buildRow(score, changeData[score.username]);
                 row.setAttribute('data-username', score.username);
                 row.setAttribute('data-points', score.points);
@@ -365,65 +365,80 @@
             return row;
         }
 
-        static _attachSort(table, changeData) {
+        static _attachSort(table, changeData, gameId) {
             const tbody = table.querySelector('tbody');
             const links = Array.from(table.querySelectorAll('thead span[data-sort-key]'));
-            const originalOrder = Array.from(tbody.children);
+            const storageKey = `neopets_hst3_sort_${gameId}`;
             
-            // Track the state of each column: { key: string, direction: 1 (desc) | -1 (asc) }
+            // 1. Load saved state
             let activeSort = { key: null, dir: 1 };
+            try {
+                const saved = localStorage.getItem(storageKey);
+                if (saved) activeSort = JSON.parse(saved);
+            } catch (e) { console.error("Failed to load sort state", e); }
 
+            // 2. Define the sorting logic as a reusable function
+            const applySort = () => {
+                if (!activeSort.key) return;
+
+                // Update UI indicators
+                links.forEach(l => {
+                    const lKey = l.getAttribute('data-sort-key');
+                    l.textContent = (lKey === activeSort.key) 
+                        ? (activeSort.dir === 1 ? '↓' : '↑') 
+                        : '⇅';
+                });
+
+                // Reorder DOM
+                Array.from(tbody.children).sort((a, b) => {
+                    const key = activeSort.key;
+                    let valA, valB;
+                    
+                    if (key === 'username') { 
+                        valA = a.getAttribute('data-username'); 
+                        valB = b.getAttribute('data-username'); 
+                    } else if (key === 'points') { 
+                        valA = parseInt(a.getAttribute('data-points')); 
+                        valB = parseInt(b.getAttribute('data-points')); 
+                    } else if (key === 'position') { 
+                        valA = parseInt(a.getAttribute('data-position')); 
+                        valB = parseInt(b.getAttribute('data-position')); 
+                    } else {
+                        valA = changeData[a.getAttribute('data-username')]?.[key] ?? null;
+                        valB = changeData[b.getAttribute('data-username')]?.[key] ?? null;
+                    }
+
+                    if (key === 'username') {
+                        return activeSort.dir === 1 ? valA.localeCompare(valB) : valB.localeCompare(valA);
+                    }
+
+                    if (valA === null && valB === null) return 0;
+                    if (valA === null) return 1;
+                    if (valB === null) return -1;
+                    
+                    return activeSort.dir === 1 ? valB - valA : valA - valB;
+                }).forEach(row => tbody.appendChild(row));
+            };
+
+            // 3. Attach click listeners
             links.forEach(link => {
                 link.addEventListener('click', () => {
                     const key = link.getAttribute('data-sort-key');
 
-                    // If clicking a different column, reset to Descending. 
-                    // If clicking the same column, toggle the direction.
                     if (activeSort.key !== key) {
                         activeSort = { key: key, dir: 1 };
                     } else {
                         activeSort.dir *= -1;
                     }
 
-                    // Update visuals: All links reset to ⇅, active link shows direction
-                    links.forEach(l => {
-                        l.textContent = (l.getAttribute('data-sort-key') === activeSort.key) 
-                            ? (activeSort.dir === 1 ? '↓' : '↑') 
-                            : '⇅';
-                    });
-
-                    Array.from(tbody.children).sort((a, b) => {
-                        let valA, valB;
-                        
-                        // Extract values
-                        if (key === 'username') { 
-                            valA = a.getAttribute('data-username'); 
-                            valB = b.getAttribute('data-username'); 
-                        } else if (key === 'points') { 
-                            valA = parseInt(a.getAttribute('data-points')); 
-                            valB = parseInt(b.getAttribute('data-points')); 
-                        } else if (key === 'position') { 
-                            valA = parseInt(a.getAttribute('data-position')); 
-                            valB = parseInt(b.getAttribute('data-position')); 
-                        } else {
-                            valA = changeData[a.getAttribute('data-username')]?.[key] ?? null;
-                            valB = changeData[b.getAttribute('data-username')]?.[key] ?? null;
-                        }
-
-                        // String sort for username
-                        if (key === 'username') {
-                            return activeSort.dir === 1 ? valA.localeCompare(valB) : valB.localeCompare(valA);
-                        }
-
-                        // Numeric sort with null-handling (pushing nulls to bottom)
-                        if (valA === null && valB === null) return 0;
-                        if (valA === null) return 1;
-                        if (valB === null) return -1;
-                        
-                        return activeSort.dir === 1 ? valB - valA : valA - valB;
-                    }).forEach(row => tbody.appendChild(row));
+                    // Save state
+                    localStorage.setItem(storageKey, JSON.stringify(activeSort));
+                    applySort();
                 });
             });
+
+            // 4. Initial Trigger if a saved sort exists
+            if (activeSort.key) applySort();
         }
     }
 
